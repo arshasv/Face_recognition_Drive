@@ -1,0 +1,14 @@
+google-api-python-client==2.94.0
+google-auth-httplib2==0.1.0
+google-auth-oauthlib==1.0.0
+fastapi
+uvicorn
+pydantic
+deepface
+opencv-python-headless
+requests
+pillow
+numpy
+python-multipart
+opencv-python
+pydrive
