@@ -174,3 +174,6 @@ cython_debug/
 .pypirc
 
 downloaded_images
+client_secrets.json
+service_account.json
+token.json
