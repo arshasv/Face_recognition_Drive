@@ -176,6 +176,8 @@ cython_debug/
 downloaded_images
 reference_images
 new_venv
+temp
+
 
 # Google API credentials
 client_secrets.json

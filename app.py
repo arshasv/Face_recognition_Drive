@@ -147,44 +147,42 @@ async def upload_reference_image(request: Request, file: UploadFile = File(...))
 async def scan_faces(reference_image: UploadFile = File(...), folder_link: str = Form(...)):
     try:
         print("Received scan request")
-        print(f"Folder link: {folder_link}")
+        print(f"Folder ID: {folder_link}")
         print(f"Reference image: {reference_image.filename}")
 
-        folder_id = extract_file_id_from_url(folder_link)
+        folder_id = folder_link  # Already extracted by frontend
         image_paths = download_images_from_google_drive(folder_id)
-        image_urls = [f"/downloaded_images/{os.path.basename(path)}" for path in image_paths]
-        print(f"Fetched {len(image_urls)} image URLs from Google Drive")
 
-        # Save reference image to local disk
-        reference_path = f"temp/{reference_image.filename}"
+        if not image_paths:
+            raise HTTPException(status_code=404, detail="No images found in the folder.")
+
         os.makedirs("temp", exist_ok=True)
+        reference_path = f"temp/{reference_image.filename}"
+
         with open(reference_path, "wb") as f:
             f.write(await reference_image.read())
         print(f"Saved reference image to {reference_path}")
 
         matched_images = []
 
-        for i, url in enumerate(image_urls):
+        for i, img_path in enumerate(image_paths):
             try:
-                response = requests.get(url)
-                local_image_path = f"temp/image_{i}.jpg"
-                with open(local_image_path, "wb") as f:
-                    f.write(response.content)
-
                 result = DeepFace.verify(
-                    reference_path,
-                    local_image_path,
+                    img1_path=reference_path,
+                    img2_path=img_path,
                     model_name='SFace',
                     enforce_detection=False,
                     detector_backend='retinaface'
                 )
 
                 if result["verified"]:
-                    matched_images.append(url)
+                    matched_images.append(f"/downloaded_images/{os.path.basename(img_path)}")
             except Exception as e:
-                print(f"Error verifying image {url}: {e}")
+                print(f"Error verifying image {img_path}: {e}")
 
         return {"matched_images": matched_images}
+
     except Exception as e:
         print(f"Error in /scan endpoint: {e}")
+        traceback.print_exc()
         raise HTTPException(status_code=500, detail="Failed to scan images")
