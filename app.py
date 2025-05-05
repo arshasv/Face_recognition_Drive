@@ -1,32 +1,56 @@
+import traceback
 import os
+
+# --- Disable GPU ---
+os.environ["CUDA_VISIBLE_DEVICES"] = "-1"
+os.environ["TF_CPP_MIN_LOG_LEVEL"] = "2" 
+os.environ["TF_FORCE_GPU_ALLOW_GROWTH"] = "false"
+os.environ["TF_ENABLE_ONEDNN_OPTS"] = "0"
+
 import shutil
 import base64
 import uuid
-from fastapi import FastAPI
+import re
+from urllib.parse import urlparse, parse_qs
+import requests
+
+from fastapi import FastAPI, UploadFile, File, Form,  HTTPException
+from fastapi import Request
 from fastapi.responses import JSONResponse
 from fastapi.staticfiles import StaticFiles
 from fastapi.middleware.cors import CORSMiddleware
 from pydantic import BaseModel
 from typing import List
 from deepface import DeepFace
-import re
-from urllib.parse import urlparse, parse_qs
 
+# --- Disable GPU for PyTorch if present ---
+import torch
+torch.cuda.is_available = lambda : False
+
+# --- Setup app ---
 app = FastAPI()
 
+# --- Setup folders ---
 DOWNLOAD_FOLDER = "downloaded_images"
+REFERENCE_FOLDER = "reference_images"
+
 os.makedirs(DOWNLOAD_FOLDER, exist_ok=True)
+os.makedirs(REFERENCE_FOLDER, exist_ok=True)
 
+# --- Serve static files ---
 app.mount("/downloaded_images", StaticFiles(directory=DOWNLOAD_FOLDER), name="downloaded_images")
+app.mount("/reference_images", StaticFiles(directory=REFERENCE_FOLDER), name="reference_images")
 
+# --- CORS ---
 app.add_middleware(
     CORSMiddleware,
-    allow_origins=["*"],  # Replace with frontend URL in production
+    allow_origins=["*"],  # Replace with specific frontend URL in production
     allow_credentials=True,
     allow_methods=["*"],
     allow_headers=["*"],
 )
 
+# --- Pydantic models ---
 class ImageURL(BaseModel):
     name: str
     url: str
@@ -35,6 +59,7 @@ class ScanRequest(BaseModel):
     referenceImage: str
     imageUrls: List[ImageURL]
 
+# --- Helper functions ---
 def extract_file_id_from_url(url: str) -> str:
     if "uc?id=" in url:
         return parse_qs(urlparse(url).query).get("id", [None])[0]
@@ -69,8 +94,12 @@ def download_images_from_google_drive(folder_id: str):
 
     return image_paths
 
+# --- API Endpoints ---
+
+from fastapi import Request
+
 @app.get("/fetch-images")
-def fetch_images(folder_id: str):
+def fetch_images(folder_id: str, request: Request):
     try:
         if os.path.exists(DOWNLOAD_FOLDER):
             shutil.rmtree(DOWNLOAD_FOLDER)
@@ -78,10 +107,11 @@ def fetch_images(folder_id: str):
 
         image_paths = download_images_from_google_drive(folder_id)
 
+        base_url = str(request.base_url).rstrip("/")
         image_info = [
             {
                 "name": os.path.basename(path),
-                "url": f"/downloaded_images/{os.path.basename(path)}"
+                "url": f"{base_url}/downloaded_images/{os.path.basename(path)}"
             }
             for path in image_paths
         ]
@@ -92,36 +122,69 @@ def fetch_images(folder_id: str):
         print(f"Error in /fetch-images: {e}")
         return JSONResponse(content={"error": str(e)}, status_code=500)
 
+
+@app.post("/upload-reference-image")
+async def upload_reference_image(request: Request, file: UploadFile = File(...)):
+    try:
+        filename = f"ref_{uuid.uuid4().hex}_{file.filename}"
+        file_path = os.path.join(REFERENCE_FOLDER, filename)
+
+        with open(file_path, "wb") as f:
+            content = await file.read()
+            f.write(content)
+
+        full_url = f"{str(request.base_url).rstrip('/')}/reference_images/{filename}"
+        return {
+        "url": str(request.base_url) + f"reference_images/{filename}",
+        "filename": filename
+        } 
+    except Exception as e:
+        print(f"Error uploading reference image: {e}")
+        return JSONResponse(content={"error": str(e)}, status_code=500)
+
+    
 @app.post("/scan")
-def scan_faces(request: ScanRequest):
-    matched_images = []
+async def scan_faces(reference_image: UploadFile = File(...), folder_link: str = Form(...)):
+    try:
+        print("Received scan request")
+        print(f"Folder link: {folder_link}")
+        print(f"Reference image: {reference_image.filename}")
 
-    reference_path = f"ref_{uuid.uuid4().hex}.jpg"
-    with open(reference_path, "wb") as f:
-        f.write(base64.b64decode(request.referenceImage.split(",")[-1]))
+        folder_id = extract_file_id_from_url(folder_link)
+        image_paths = download_images_from_google_drive(folder_id)
+        image_urls = [f"/downloaded_images/{os.path.basename(path)}" for path in image_paths]
+        print(f"Fetched {len(image_urls)} image URLs from Google Drive")
 
-    for img in request.imageUrls:
-        try:
-            # Handle URLs like: http://localhost:8000/downloaded_images/AKR04897.jpg
-            parsed = urlparse(img.url)
-            file_name = os.path.basename(parsed.path)
+        # Save reference image to local disk
+        reference_path = f"temp/{reference_image.filename}"
+        os.makedirs("temp", exist_ok=True)
+        with open(reference_path, "wb") as f:
+            f.write(await reference_image.read())
+        print(f"Saved reference image to {reference_path}")
 
-            # Optional fallback if filename is passed in query string (unlikely now)
-            if not file_name:
-                qs = parse_qs(parsed.query)
-                file_name = qs.get("id", [None])[0]
+        matched_images = []
 
-            local_image_path = os.path.join(DOWNLOAD_FOLDER, file_name)
+        for i, url in enumerate(image_urls):
+            try:
+                response = requests.get(url)
+                local_image_path = f"temp/image_{i}.jpg"
+                with open(local_image_path, "wb") as f:
+                    f.write(response.content)
 
-            if not os.path.exists(local_image_path):
-                print(f"File not found: {local_image_path}")
-                continue
+                result = DeepFace.verify(
+                    reference_path,
+                    local_image_path,
+                    model_name='SFace',
+                    enforce_detection=False,
+                    detector_backend='retinaface'
+                )
 
-            result = DeepFace.verify(reference_path, local_image_path, enforce_detection=False)
-            if result.get("verified"):
-                matched_images.append(img)
+                if result["verified"]:
+                    matched_images.append(url)
+            except Exception as e:
+                print(f"Error verifying image {url}: {e}")
 
-        except Exception as e:
-            print(f"Error verifying {img.name}: {e}")
-
-    os.remove(reference_path)
+        return {"matched_images": matched_images}
+    except Exception as e:
+        print(f"Error in /scan endpoint: {e}")
+        raise HTTPException(status_code=500, detail="Failed to scan images")

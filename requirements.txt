@@ -12,3 +12,4 @@ numpy
 python-multipart
 opencv-python
 pydrive
+requests
