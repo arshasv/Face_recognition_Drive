@@ -175,7 +175,7 @@ cython_debug/
 
 downloaded_images
 reference_images
-new_venv
+tfenv
 temp
 static
 
