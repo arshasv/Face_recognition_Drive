@@ -177,6 +177,7 @@ downloaded_images
 reference_images
 new_venv
 temp
+static
 
 
 # Google API credentials
